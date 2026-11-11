@@ -1,0 +1,20 @@
+name: Print Learn Server
+version: "1.0.0"
+slug: print_learn
+description: Kho ma loi tu hoc cho Zalo Print Bot (SQLite + API cong 8765)
+arch:
+  - aarch64
+  - amd64
+  - armv7
+  - armhf
+startup: application
+boot: auto
+init: false
+ports:
+  8765/tcp: 8765
+ports_description:
+  8765/tcp: API hoc / tra / xoa ma loi cua Print Bot
+options:
+  token: ""
+schema:
+  token: str?
