@@ -17,12 +17,17 @@ Du lieu: SQLite tai PRINT_DB_PATH (mac dinh /data/print_learn.db, khi chay
 local thi ./print_learn.db). Moi lan ghi deu luu 1 ban vao bang history de
 co the tra cuu / khoi phuc ban truoc.
 """
+import csv
+import io
 import json
 import os
+import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
+
+VN_TZ = timezone(timedelta(hours=7))
 
 DB_PATH = os.environ.get("PRINT_DB_PATH", "./print_learn.db")
 TOKEN = os.environ.get("PRINT_BOT_TOKEN", "")
@@ -49,7 +54,38 @@ def db():
                action TEXT NOT NULL DEFAULT 'upsert'
            )"""
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS repair_logs (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               date_iso TEXT NOT NULL,
+               device TEXT NOT NULL,
+               position TEXT DEFAULT '',
+               machine TEXT DEFAULT '',
+               note TEXT DEFAULT '',
+               group_id TEXT DEFAULT '',
+               created_at TEXT NOT NULL
+           )"""
+    )
     return conn
+
+
+def parse_date_to_iso(raw):
+    """Nhan 'dd/mm/yyyy' hoac 'yyyy-mm-dd'; rong/khong hop le -> hom nay (gio VN)."""
+    raw = (raw or "").strip()
+    if raw:
+        for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(raw, fmt).date().isoformat()
+            except ValueError:
+                continue
+    return datetime.now(VN_TZ).date().isoformat()
+
+
+def iso_to_display(iso):
+    try:
+        return datetime.strptime(iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+    except (ValueError, TypeError):
+        return iso or ""
 
 
 def now_iso():
@@ -102,6 +138,71 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(200, {"found": False, "code": code, "text": ""})
             return
+        if parsed.path == "/logs":
+            q = (qs.get("q", [""])[0] or "").strip()
+            machine = (qs.get("machine", [""])[0] or "").strip().upper()
+            try:
+                limit = min(max(int(qs.get("limit", ["10"])[0]), 1), 100)
+            except ValueError:
+                limit = 10
+            sql = "SELECT id, date_iso, device, position, machine, note FROM repair_logs WHERE 1=1"
+            args = []
+            if q:
+                sql += " AND (LOWER(device) LIKE ? OR LOWER(position) LIKE ? OR LOWER(note) LIKE ?)"
+                like = f"%{q.lower()}%"
+                args += [like, like, like]
+            if machine:
+                sql += " AND machine = ?"
+                args.append(machine)
+            sql += " ORDER BY date_iso DESC, id DESC LIMIT ?"
+            args.append(limit)
+            conn = db()
+            rows = conn.execute(sql, args).fetchall()
+            conn.close()
+            self._json(
+                200,
+                {
+                    "count": len(rows),
+                    "items": [
+                        {
+                            "id": r[0],
+                            "date": iso_to_display(r[1]),
+                            "device": r[2],
+                            "position": r[3],
+                            "machine": r[4],
+                            "note": r[5],
+                        }
+                        for r in rows
+                    ],
+                },
+            )
+            return
+        if parsed.path == "/logs.csv":
+            conn = db()
+            rows = conn.execute(
+                "SELECT date_iso, device, position, machine, note FROM repair_logs "
+                "ORDER BY date_iso ASC, id ASC"
+            ).fetchall()
+            conn.close()
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow(
+                ["STT", "Tên Vật Tư", "Vị Trí Thay", "Ngày/Tháng/Năm", "Máy In", "Ghi chú"]
+            )
+            for i, r in enumerate(rows, 1):
+                writer.writerow([i, r[1], r[2], iso_to_display(r[0]), r[3], r[4]])
+            body = ("﻿" + buf.getvalue()).encode("utf-8")
+            self.send_response(200)
+            self.send_header(
+                "Content-Type", "text/csv; charset=utf-8"
+            )
+            self.send_header(
+                "Content-Disposition", "attachment; filename=nhat-ky-sua-chua.csv"
+            )
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if parsed.path == "/list":
             conn = db()
             rows = conn.execute(
@@ -124,6 +225,43 @@ class Handler(BaseHTTPRequestHandler):
         if not self._guard():
             return
         parsed = urlparse(self.path)
+        if parsed.path == "/log":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                data = json.loads(self.rfile.read(length) or b"{}")
+            except Exception:
+                self._json(400, {"ok": False, "error": "invalid json"})
+                return
+            device = str(data.get("device", "")).strip()
+            if not device:
+                self._json(400, {"ok": False, "error": "device is required"})
+                return
+            date_iso = parse_date_to_iso(str(data.get("date", "")))
+            machine = str(data.get("machine", "")).strip().upper()
+            m = re.search(r"DC\s?([1-4])", machine)
+            machine = f"DC{m.group(1)}" if m else machine
+            conn = db()
+            cur = conn.execute(
+                "INSERT INTO repair_logs(date_iso, device, position, machine, note, group_id, created_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (
+                    date_iso,
+                    device,
+                    str(data.get("position", "")).strip(),
+                    machine,
+                    str(data.get("note", "")).strip(),
+                    str(data.get("group_id", "")).strip(),
+                    now_iso(),
+                ),
+            )
+            conn.commit()
+            new_id = cur.lastrowid
+            conn.close()
+            self._json(
+                200,
+                {"ok": True, "id": new_id, "date": iso_to_display(date_iso)},
+            )
+            return
         if parsed.path != "/learn":
             self._json(404, {"ok": False, "error": "not found"})
             return

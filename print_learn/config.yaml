@@ -1,5 +1,5 @@
 name: Print Learn Server
-version: "1.0.0"
+version: "1.1.0"
 slug: print_learn
 description: Kho ma loi tu hoc cho Zalo Print Bot (SQLite + API cong 8765)
 arch:
