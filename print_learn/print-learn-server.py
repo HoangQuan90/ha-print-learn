@@ -299,6 +299,46 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
+        if parsed.path == "/log":
+            raw_id = (qs.get("id", [""])[0] or "").strip()
+            try:
+                log_id = int(raw_id)
+            except ValueError:
+                self._json(400, {"ok": False, "error": "id must be a number"})
+                return
+            conn = db()
+            row = conn.execute(
+                "SELECT date_iso, device FROM repair_logs WHERE id = ?", (log_id,)
+            ).fetchone()
+            cur = conn.execute("DELETE FROM repair_logs WHERE id = ?", (log_id,))
+            conn.commit()
+            deleted = cur.rowcount
+            conn.close()
+            self._json(
+                200,
+                {
+                    "ok": True,
+                    "deleted": deleted,
+                    "id": log_id,
+                    "date": iso_to_display(row[0]) if row else "",
+                    "device": row[1] if row else "",
+                },
+            )
+            return
+        if parsed.path == "/logs":
+            date_iso = parse_date_to_iso(qs.get("date", [""])[0])
+            conn = db()
+            cur = conn.execute(
+                "DELETE FROM repair_logs WHERE date_iso = ?", (date_iso,)
+            )
+            conn.commit()
+            deleted = cur.rowcount
+            conn.close()
+            self._json(
+                200,
+                {"ok": True, "deleted": deleted, "date": iso_to_display(date_iso)},
+            )
+            return
         if parsed.path != "/learn":
             self._json(404, {"ok": False, "error": "not found"})
             return
